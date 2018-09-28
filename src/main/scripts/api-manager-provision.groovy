@@ -81,7 +81,7 @@ class CICDUtil
     def init ()
     {
         
-		// initilize props .
+		// initilize props ......
 
               
         def props = ['username':System.properties.'anypoint.user', 
