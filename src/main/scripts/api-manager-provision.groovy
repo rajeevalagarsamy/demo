@@ -10,9 +10,7 @@ class CICDUtil
     static def int INFO=2;
     static def int DEBUG=3;
     static def int TRACE=4;
-
-
-
+   
     static def logLevel = DEBUG;  //root logger level
 
     static def log (java.lang.Integer level, java.lang.Object content)
@@ -45,10 +43,8 @@ class CICDUtil
     {
         log(DEBUG,  "START getAnypointToken")
 
-
         def username=props.username
         def password=props.password 
-
 
         log(TRACE, "username=" + username)
         log(TRACE, "password=" + password)
@@ -64,7 +60,8 @@ class CICDUtil
         if ( connection.responseCode =~ '2..') 
         {
 
-        }else
+        }
+        else
         {
             throw new Exception("Failed to get the login token!")
         }
@@ -84,8 +81,9 @@ class CICDUtil
     def init ()
     {
         
-      
-        
+
+
+              
         def props = ['username':System.properties.'anypoint.user', 
                      'password': System.properties.'anypoint.password',
                      'orgId': System.properties.'orgId',
@@ -93,11 +91,22 @@ class CICDUtil
                      'envId': System.properties.'envId',
                      'assetId': System.properties.'assetId',
                      'assetVersion': System.properties.'assetVersion',
-                     'filePath' : System.properties.'filePath',
-                     'policyFile' : System.properties.'policyFile',
-                     'path': System.getProperty("user.dir")
-
-                    ]
+                     'path': System.getProperty("user.dir"),
+                     'clientIdEnforcementPolicy': System.properties.'clientIdEnforcementPolicy',
+                     'rateLimitPolicy': System.properties.'rateLimitPolicy',
+                     'oAuthPolicy': System.properties.'oAuthPolicy',
+                     'timePeriod':System.properties.'timePeriod',
+                     'maxRequests':System.properties.'maxRequests',
+                     'scopes':System.properties.'scopes', 
+                     'tokenUrl':System.properties.'tokenUrl',
+                     'apiImplUri':System.properties.'apiImplUri',
+                     'apiProxyUri':System.properties.'apiProxyUri',
+                     'isCloudHub':System.properties.'isCloudHub',
+                     'muleVersion4OrAbove':System.properties.'muleVersion4OrAbove',
+                     'apiType':System.properties.'apiType',
+                     'deploymentType':System.properties.'deploymentType', 
+                     'apiInstanceLabel':System.properties.'apiInstanceLabel'
+                     ]
 
         log(DEBUG,  "props->" + props)
         return props;
@@ -107,15 +116,93 @@ class CICDUtil
     def provisionAPIManager(props)
     {
         def token = getAnypointToken(props);
+        
+        def profileDetails = getProfile(token,props);
 
-        def result = getAPIInstanceByExchangeAssetDetail(props, token);
-
+        def result = getAPIInstanceByExchangeAssetDetail(props, token, profileDetails);
+        
+        if ( props.clientIdEnforcementPolicy == "true")
+        {
+          def name = "clientIdEnforcementPolicy"
+          def policyDetails = applyPolicy (token, result.apiDiscoveryId , props , name ,profileDetails)
+        }
+        
+        if ( props.rateLimitPolicy == "true")
+        {
+          def name = "rateLimitPolicy"
+          def policyDetails = applyPolicy (token, result.apiDiscoveryId , props , name , profileDetails)
+        }
+            
+        if ( props.oAuthPolicy == "true")
+        {
+          def name = "oAuthPolicy"
+          def policyDetails = applyPolicy (token, result.apiDiscoveryId , props , name , profileDetails)
+        }
         log(INFO, "apiInstance=" + result)
 
         return result
     }
+    
+    def getProfile ( token , props )
+    {
+        log(DEBUG,  "START getProfile")
+        
+        def orgId = null
+        def envId = null
+        
+        def urlString = "https://anypoint.mulesoft.com/accounts/api/profile"
+        
+        def headers=["Content-Type":"application/json", "Authorization": "Bearer " + token, "Accept": "application/json"]
+        
+        def connection = doRESTHTTPCall(urlString, "GET", null, headers)
+        
+        def response = null
+        def profDet = null 
+        def allEnvIns = null
+        def envIns = null
+        
+        if (connection.responseCode == 200)
+            {
+            
+                log(INFO, " getProfile is successfull! statusCode=" + connection.responseCode)
+                response = "${connection.content}"
+                profDet = new JsonSlurper().parseText(response)
+                //log(INFO, " Profile Details : " + profDet )
+                
+                orgId = profDet.organization.id
+                
+                allEnvIns = profDet.organization.environments
+                
+                allEnvIns.each {    
+                
+                log(INFO,"For each it : " + it)
+                
+                if (it.name == props.envId )
+                       
+                        {
+                            envIns = it
+                            envId = envIns.id
+                            log(INFO, "Matched" + envId)
+                        }
+                      }
+            }
+        else
+            {
+            
+                throw new Exception("Failed to get the profile statusCode=${connection.responseCode} responseMessage=${response}")
+            
+            }
+            
+       def profileDetails  = ["orgId": orgId, "envId": envId]
+       
+       log ( INFO , "ProfileDetails" + profileDetails )
+       
+       log(DEBUG,  "START getProfile")
+       
+       return profileDetails
+    }
 
-    def getAPIInstanceByExchangeAssetDetail(props, token)
+    def getAPIInstanceByExchangeAssetDetail(props, token , profileDetails)
     {
 
         log(DEBUG,  "START getAPIInstanceByExchangeAssetDetail")
@@ -124,9 +211,8 @@ class CICDUtil
         def apiDiscoveryName
         def apiDiscoveryVersion
         def apiDiscoveryId
-        def policyDetails
-
-        def urlString = "https://anypoint.mulesoft.com/exchange/api/v1/assets/"+props.orgId+"/"+props.assetId
+        
+        def urlString = "https://anypoint.mulesoft.com/exchange/api/v1/assets/"+profileDetails.orgId+"/"+props.assetId
 
         def headers=["Content-Type":"application/json", "Authorization": "Bearer " + token, "Accept": "application/json"]
 
@@ -144,32 +230,37 @@ class CICDUtil
             def response = "${connection.content}"
 
             def allAPIInstances = new JsonSlurper().parseText(response).instances;
-
+          
             allAPIInstances.each{ 
+                
                 log(INFO, it)
-                if (it.environmentId == props.envId && it.version == props.version)
-                {
+                
+                if (it.environmentId == profileDetails.envId && it.productAPIVersion == props.version && it.version == props.assetVersion )
+                
+                  {
+                    
                     apiInstance = it;
-                    apiDiscoveryName = "groupId:"+props.orgId+":assetId:"+ prosp.assetId
+                    apiDiscoveryName = "groupId:"+profileDetails.orgId+":assetId:"+ props.assetId
                     apiDiscoveryVersion = apiInstance.name
                     apiDiscoveryId = apiInstance.id
-                }
+                    
+                    log ( INFO , "This API Instance matched with the ArtifactID , ArtifactVersion & APIVersion provided : " + apiInstance )
+                  }
+                
             }
 
-            log(INFO, "apiInstance for env " + props.envId + " is " + apiInstance);
+            log(INFO, "apiInstance for env " + profileDetails.envId + " is " + apiInstance);
 
         }
 
         if (apiInstance == null)
         {
-            apiInstance = createAPIInstance(token, props)
+            apiInstance = createAPIInstance(token, props , profileDetails)
             
             apiDiscoveryName = apiInstance.autodiscoveryInstanceName
             apiDiscoveryVersion = apiInstance.productVersion
             apiDiscoveryId = apiInstance.id
-            policyDetails = applyPolicy (token, apiDiscoveryId , props)
-                    
-
+         
         }
 
         def result = ["apiInstance": apiInstance, "apiDiscoveryName": apiDiscoveryName, "apiDiscoveryVersion":apiDiscoveryVersion, "apiDiscoveryId": apiDiscoveryId]
@@ -180,71 +271,113 @@ class CICDUtil
 
     }
     
-    def applyPolicy (token, apiId , props)
+    def applyPolicy (token, apiId , props, name , profileDetails )
     {
-        log(DEBUG,  "START applyPolicy");
-        def inputFile = new File(props.policyFile)
+        log(DEBUG,  "START applyPolicy :" + name);
+       
+        def clientIdPolicy = /{"policyTemplateId": "294","groupId": "68ef9520-24e9-4cf2-b2f5-620025690913", "assetId": "client-id-enforcement", "assetVersion": "1.1.2", "configurationData": { "credentialsOriginHasHttpBasicAuthenticationHeader":"customExpression","clientIdExpression": "#[attributes.headers['client_id']]","clientSecretExpression": "#[attributes.headers['client_secret']]"}, "pointcutData":null}/ 
         
-       // def requestTemplate = '{"policyTemplateId": "294","groupId": "68ef9520-24e9-4cf2-b2f5-620025690913","assetId": "client-id-enforcement","assetVersion": "1.1.2","configurationData":{"credentialsOriginHasHttpBasicAuthenticationHeader":"customExpression","clientIdExpression": "#[attributes.headers[]]","clientSecretExpression": "#[attributes.headers[]]" },"pointcutData":null}'
+        def rateLimitPolicy = /{"policyTemplateId": "295","groupId": "68ef9520-24e9-4cf2-b2f5-620025690913","assetId": "rate-limiting","assetVersion": "1.2.1","configuration": {"rateLimits": [{"timePeriodInMilliseconds": null,"maximumRequests": null}], "clusterizable": true, "exposeHeaders": true},"pointcutData":null }/
         
-            
-        def request = new JsonSlurper().parseText(inputFile.text);     
+        def oauthPolicy = /{"policyTemplateId": "302","groupId": "68ef9520-24e9-4cf2-b2f5-620025690913", "assetId": "external-oauth2-access-token-enforcement","assetVersion": "1.1.1", "configuration": {"scopes": null,"tokenUrl": null,"exposeHeaders": true }, "pointcutData":null }/
+       
+       def request = null
+        
+        if ( name == "clientIdEnforcementPolicy" )
+        {  
+           request = new JsonSlurper().parseText(clientIdPolicy);     
+        }
+        
+        if ( name == "rateLimitPolicy" )
+        {          
+           request = new JsonSlurper().parseText(rateLimitPolicy);
+          request.configuration.rateLimits[0].timePeriodInMilliseconds = props.timePeriod
+          request.configuration.rateLimits[0].maximumRequests = props.maxRequests
+        }
+        
+        if ( name == "oAuthPolicy" )
+        {  
+           request = new JsonSlurper().parseText(oauthPolicy); 
+          request.configuration.scopes = props.scopes
+          request.configuration.tokenUrl = props.tokenUrl
+        }
         
         def message = JsonOutput.toJson(request)
         
-        log(INFO, "applyPolicy request message=" + message);
+        log(INFO, "applyPolicy request message for Policy : "+name + ", Message ->" + message);
 
-        def urlString = "https://anypoint.mulesoft.com/apimanager/api/v1/organizations/"+props.orgId+"/environments/"+props.envId + "/apis/"+apiId+"/policies"
+        def urlString = "https://anypoint.mulesoft.com/apimanager/api/v1/organizations/"+profileDetails.orgId+"/environments/"+profileDetails.envId + "/apis/"+apiId+"/policies"
                        
         def headers=["Content-Type":"application/json", "Authorization": "Bearer " + token, "Accept": "application/json"]
 
         def connection = doRESTHTTPCall(urlString, "POST", message, headers)
-
-        def response = "${connection.content}" 
+          
+        def response = null
+        
+        def policy = null 
         
         if ( connection.responseCode =~ '2..') 
         {
-            log(INFO, "the Policy is created successfully! statusCode=" + connection.responseCode)
+            log(INFO, "the Policy: "+name + " is created successfully! statusCode=" + connection.responseCode)
+            response = "${connection.content}" 
+            policy = new JsonSlurper().parseText(response)
+            log(DEBUG, "Policy Details "+ policy )
         }
+        
+        else if ( connection.responseCode =~ '409') 
+        {
+            log(INFO, "The Policy: "+name + " already exists , cannot overide ! statusCode=" + connection.responseCode)
+        }
+        
         else
         {
-            throw new Exception("Failed to create Policy ! statusCode=${connection.responseCode} responseMessage=${response}")
+            throw new Exception("Failed to create Policy: "+name + "  ! statusCode=${connection.responseCode} responseMessage=${response}")
         }
-        def policy = new JsonSlurper().parseText(response)
-
-        log(DEBUG, "Policy Details "+ policy )
         
-        log(DEBUG,  "END applyPolicy")
-
-        return policy;
+        log(DEBUG,  "END applyPolicy: "+name)
+        
+        return policy
     
     }
 
 
-    def createAPIInstance(token, props)
+    def createAPIInstance(token, props , profileDetails)
     {
         log(DEBUG,  "START createAPIInstance")
 
-        //def requestTemplate = '{ "spec": { "groupId": null,"assetId": null,"version": null }, "endpoint": {"uri": null,"proxyUri": null,"isCloudHub": false,"proxyRegistrationUri": null, "muleVersion4OrAbove": true,"type": "http", "deploymentType": "HY","policiesVersion": null,  "referencesUserDomain": false,"responseTimeout": null,"wsdlConfig": null },"instanceLabel": null}'
+        def apiTemplate = /{ "spec": {"groupId": null,"assetId": null,"version": null},"endpoint": {"uri": null,"proxyUri": null,"isCloudHub": null,"muleVersion4OrAbove": null,"type": null,"deploymentType": null},"instanceLabel": null}/
         
-        def apiFileName = props.filePath+props.envId+'_api_spec.json'
-        
-        def inputApiFile = new File(apiFileName)
-        
-        def request = new JsonSlurper().parseText(inputApiFile.text);
+        def request = new JsonSlurper().parseText(apiTemplate);
+        request.spec.groupId = profileDetails.orgId
+        request.spec.assetId = props.assetId
+        request.spec.version = props.assetVersion
+        request.endpoint.uri = props.apiImplUri
+        request.endpoint.proxyUri = props.apiProxyUri
+        if ( props.isCloudHub == "true" )
+        {
+          request.endpoint.isCloudHub = true
+        }
+        else 
+        {
+          request.endpoint.isCloudHub = false
+        }
+        request.endpoint.muleVersion4OrAbove = props.muleVersion4OrAbove
+        request.endpoint.type = props.apiType 
+        request.endpoint.deploymentType = props.deploymentType
+        request.instanceLabel = props.apiInstanceLabel
 
         def message = JsonOutput.toJson(request)
         
         log(INFO, "createAPIInstance request message=" + message);
 
-        def urlString = "https://anypoint.mulesoft.com/apimanager/api/v1/organizations/"+props.orgId+"/environments/"+props.envId + "/apis"
+        def urlString = "https://anypoint.mulesoft.com/apimanager/api/v1/organizations/"+profileDetails.orgId+"/environments/"+profileDetails.envId + "/apis"
         
         def headers=["Content-Type":"application/json", "Authorization": "Bearer " + token, "Accept": "application/json"]
-
+              
         def connection = doRESTHTTPCall(urlString, "POST", message, headers)
-
+            
         def response = "${connection.content}"
-
+          
         if ( connection.responseCode =~ '2..') 
         {
             log(INFO, "the API instance is created successfully! statusCode=" + connection.responseCode)
@@ -307,15 +440,7 @@ class CICDUtil
 
     def persisteAPIDiscoveryDetail (props, result)
     {
-        //def outputFileName = props.filePath+props.envId+'_output.txt'
-        
-        //def outputFile = new File(outputFileName)
-
-        //assert outputFile.canWrite() : "${props.targetPropFile} file cannot be write"
-
-        //outputFile.append("apiDiscoveryVersion="+result.apiDiscoveryVersion+"\n")
-        //outputFile.append("apiDiscoveryName="+result.apiDiscoveryName+"\n")
-        //outputFile.append("apiDiscoveryId="+result.apiDiscoveryId+"\n")
+       
         
         Properties props1 = new Properties()
         def config = props.path+"/src/main/resources/config.properties"
@@ -326,7 +451,6 @@ class CICDUtil
         props1.setProperty('api.id',result.apiDiscoveryId.toString())
         log(DEBUG,  "Afer change api.id=" + props1.getProperty('api.id') )
         props1.store(propsFile.newWriter(), null)
-  
 
     }
 
@@ -337,11 +461,11 @@ class CICDUtil
 
         def props = util.init();
       
-          //def exchangeDetail = util.extractExchangeAssetDetail(props);
-
+          
           def result = util.provisionAPIManager(props);
-
-          util.persisteAPIDiscoveryDetail(props, result)
+         
+      
+         util.persisteAPIDiscoveryDetail(props, result)
           
          
 
